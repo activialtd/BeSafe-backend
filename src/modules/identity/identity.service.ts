@@ -1,8 +1,8 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import type { AppEnv } from '@/config/env';
-import { ApiError } from '@/common/api-error';
-import { ResilientHttp } from '@/common/resilient-http';
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import type { AppEnv } from "@/config/env";
+import { ApiError } from "@/common/api-error";
+import { ResilientHttp } from "@/common/resilient-http";
 
 // ── Ports ─────────────────────────────────────────────────
 export interface NinResult {
@@ -15,6 +15,7 @@ export interface NinResult {
   providerRef?: string;
   raw?: unknown;
 }
+
 export interface LicenseResult {
   ok: boolean;
   fullName?: string;
@@ -28,108 +29,92 @@ export interface LicenseResult {
 
 export abstract class IdentityProvider {
   abstract verifyNin(nin: string, dateOfBirth?: string): Promise<NinResult>;
-  abstract verifyDriverLicense(licenseNumber: string, dateOfBirth?: string): Promise<LicenseResult>;
+  abstract verifyDriverLicense(
+    licenseNumber: string,
+    dateOfBirth?: string,
+  ): Promise<LicenseResult>;
 }
 
-// ── Mono adapter (NIN) ────────────────────────────────────
-// Docs: https://docs.mono.co/reference/nin-lookup
+// ── Dojah Adapter (NIN & Driver's License) ────────────────
+// Docs: https://docs.dojah.io/reference/kyc-nin
 @Injectable()
-export class MonoAdapter implements OnModuleInit {
+export class DojahAdapter implements OnModuleInit {
   private http!: ResilientHttp;
-  private readonly logger = new Logger(MonoAdapter.name);
+  private readonly logger = new Logger(DojahAdapter.name);
 
   constructor(private readonly config: ConfigService<AppEnv, true>) {}
 
   onModuleInit() {
     this.http = new ResilientHttp({
-      name: 'mono',
-      baseURL: this.config.get('MONO_BASE_URL', { infer: true }),
-      timeoutMs: this.config.get('MONO_TIMEOUT_MS', { infer: true }),
+      name: "dojah",
+      baseURL: this.config.get("DOJAH_BASE_URL", { infer: true }),
+      timeoutMs: this.config.get("DOJAH_TIMEOUT_MS", { infer: true }),
       headers: {
-        'mono-sec-key': this.config.get('MONO_SECRET_KEY', { infer: true }),
-        'Content-Type': 'application/json',
+        AppId: this.config.get("DOJAH_APP_ID", { infer: true }),
+        Authorization: this.config.get("DOJAH_PRIVATE_KEY", { infer: true }),
+        "Content-Type": "application/json",
       },
     });
   }
 
-  async lookupNin(nin: string, dob?: string): Promise<NinResult> {
-    const body: Record<string, unknown> = { nin };
-    if (dob) body.date_of_birth = dob;
-    // Mono NIN lookup endpoint — /v2/lookup/nin
-    const data = await this.http.request<{ status?: string; data?: any; message?: string }>({
-      method: 'POST',
-      url: '/v2/lookup/nin',
-      data: body,
+  async lookupNin(nin: string): Promise<NinResult> {
+    const data = await this.http.request<{ entity?: any; error?: string }>({
+      method: "GET",
+      url: `/api/v1/kyc/nin?nin=${nin}`,
     });
-    if (data.status && data.status !== 'successful') {
-      return { ok: false, provider: 'mono', raw: data };
+
+    if (!data.entity) {
+      return { ok: false, provider: "dojah", raw: data };
     }
-    const d = data.data ?? {};
+
+    const d = data.entity;
     return {
       ok: true,
-      fullName: [d.first_name, d.middle_name, d.last_name].filter(Boolean).join(' ').trim() ||
-        d.full_name,
+      fullName: [d.first_name, d.middle_name, d.last_name]
+        .filter(Boolean)
+        .join(" ")
+        .trim(),
       dateOfBirth: d.date_of_birth,
       gender: d.gender,
       photoBase64: d.photo,
-      provider: 'mono',
-      providerRef: d.session_id ?? d.reference,
+      provider: "dojah",
       raw: data,
     };
   }
-}
 
-// ── VerifyMe adapter (Driver License) ─────────────────────
-// Docs: https://docs.verifyme.ng/#drivers-license-verification
-@Injectable()
-export class VerifyMeAdapter implements OnModuleInit {
-  private http!: ResilientHttp;
-  private readonly logger = new Logger(VerifyMeAdapter.name);
+  async lookupLicense(
+    licenseNumber: string,
+    dob?: string,
+  ): Promise<LicenseResult> {
+    const query = new URLSearchParams({ dl_number: licenseNumber });
+    if (dob) query.append("dob", dob);
 
-  constructor(private readonly config: ConfigService<AppEnv, true>) {}
-
-  onModuleInit() {
-    this.http = new ResilientHttp({
-      name: 'verifyme',
-      baseURL: this.config.get('VERIFYME_BASE_URL', { infer: true }),
-      timeoutMs: this.config.get('VERIFYME_TIMEOUT_MS', { infer: true }),
-      headers: {
-        userid: this.config.get('VERIFYME_USER_ID', { infer: true }),
-        apiKey: this.config.get('VERIFYME_API_KEY', { infer: true }),
-        'Content-Type': 'application/json',
-      },
+    const data = await this.http.request<{ entity?: any; error?: string }>({
+      method: "GET",
+      url: `/api/v1/kyc/dl?${query.toString()}`,
     });
-  }
 
-  async lookupLicense(licenseNumber: string, dob?: string): Promise<LicenseResult> {
-    const body: Record<string, unknown> = {
-      searchParameter: licenseNumber,
-      verificationType: 'DRIVERS-LICENSE-FULL-DETAILS-VERIFICATION',
-    };
-    if (dob) body.dob = dob;
-    const data = await this.http.request<{ response?: any; requestSuccessful?: boolean }>({
-      method: 'POST',
-      url: '/v2/biobject/drivers-license/full',
-      data: body,
-    });
-    if (!data.requestSuccessful || !data.response) {
-      return { ok: false, provider: 'verifyme', raw: data };
+    if (!data.entity) {
+      return { ok: false, provider: "dojah", raw: data };
     }
-    const r = data.response;
+
+    const r = data.entity;
     return {
       ok: true,
-      fullName: [r.firstName, r.middleName, r.lastName].filter(Boolean).join(' ').trim(),
-      licenseClass: r.licenseClass ?? r.class,
-      expiryDate: r.expiryDate,
-      issueDate: r.issueDate,
-      provider: 'verifyme',
-      providerRef: r.reference,
+      fullName: [r.first_name, r.middle_name, r.last_name]
+        .filter(Boolean)
+        .join(" ")
+        .trim(),
+      licenseClass: r.class,
+      expiryDate: r.expiry_date,
+      issueDate: r.issue_date,
+      provider: "dojah",
       raw: data,
     };
   }
 }
 
-// ── Facade (also our IdentityProvider implementation) ────
+// ── Facade ────────────────────────────────────────────────
 @Injectable()
 export class IdentityService extends IdentityProvider {
   private readonly logger = new Logger(IdentityService.name);
@@ -137,47 +122,57 @@ export class IdentityService extends IdentityProvider {
 
   constructor(
     private readonly config: ConfigService<AppEnv, true>,
-    private readonly mono: MonoAdapter,
-    private readonly verifyme: VerifyMeAdapter,
+    private readonly dojah: DojahAdapter,
   ) {
     super();
-    this.stub = this.config.get('FEATURE_STUB_IDENTITY_PROVIDERS', { infer: true });
+    this.stub = this.config.get("FEATURE_STUB_IDENTITY_PROVIDERS", {
+      infer: true,
+    });
   }
 
   async verifyNin(nin: string, dob?: string): Promise<NinResult> {
     if (!/^\d{11}$/.test(nin)) {
-      throw new ApiError({ code: 'INVALID_INPUT', message: 'NIN must be exactly 11 digits' });
+      throw new ApiError({
+        code: "INVALID_INPUT",
+        message: "NIN must be exactly 11 digits",
+      });
     }
+
     if (this.stub) {
       this.logger.warn(`STUB NIN verify for ${nin.slice(0, 3)}***`);
       return {
         ok: true,
-        fullName: 'Stub Verified User',
-        dateOfBirth: '1995-01-01',
-        gender: 'F',
-        provider: 'stub',
-        providerRef: `stub_${Date.now()}`,
+        fullName: "Stub Verified User",
+        dateOfBirth: "1995-01-01",
+        gender: "F",
+        provider: "stub",
       };
     }
-    return this.mono.lookupNin(nin, dob);
+    return this.dojah.lookupNin(nin);
   }
 
-  async verifyDriverLicense(licenseNumber: string, dob?: string): Promise<LicenseResult> {
+  async verifyDriverLicense(
+    licenseNumber: string,
+    dob?: string,
+  ): Promise<LicenseResult> {
     if (!licenseNumber || licenseNumber.length < 5) {
-      throw new ApiError({ code: 'INVALID_INPUT', message: 'License number is invalid' });
+      throw new ApiError({
+        code: "INVALID_INPUT",
+        message: "License number is invalid",
+      });
     }
+
     if (this.stub) {
       this.logger.warn(`STUB license verify for ${licenseNumber}`);
       return {
         ok: true,
-        fullName: 'Stub Verified Driver',
-        licenseClass: 'D',
-        issueDate: '2020-06-15',
-        expiryDate: '2028-06-15',
-        provider: 'stub',
-        providerRef: `stub_${Date.now()}`,
+        fullName: "Stub Verified Driver",
+        licenseClass: "D",
+        issueDate: "2020-06-15",
+        expiryDate: "2028-06-15",
+        provider: "stub",
       };
     }
-    return this.verifyme.lookupLicense(licenseNumber, dob);
+    return this.dojah.lookupLicense(licenseNumber, dob);
   }
 }

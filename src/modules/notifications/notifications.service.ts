@@ -1,70 +1,76 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { ResilientHttp } from '@/common/resilient-http';
-import type { AppEnv } from '@/config/env';
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import type { AppEnv } from "@/config/env";
+import { ResilientHttp } from "@/common/resilient-http";
+
+export interface SmsPayload {
+  to: string;
+  body: string;
+}
 
 export interface SmsResult {
   ok: boolean;
-  provider: string;
   providerRef?: string;
-  error?: string;
+  error?: unknown;
 }
 
 @Injectable()
 export class NotificationsService implements OnModuleInit {
+  private http!: ResilientHttp;
+  private apiKey!: string;
+  private senderId!: string;
   private readonly logger = new Logger(NotificationsService.name);
-  private http?: ResilientHttp;
-  private stub!: boolean;
-  private from?: string;
 
   constructor(private readonly config: ConfigService<AppEnv, true>) {}
 
   onModuleInit() {
-    this.stub = this.config.get('FEATURE_STUB_SMS', { infer: true });
-    const sid = this.config.get('TWILIO_ACCOUNT_SID', { infer: true });
-    const token = this.config.get('TWILIO_AUTH_TOKEN', { infer: true });
-    this.from = this.config.get('TWILIO_FROM_NUMBER', { infer: true });
-    if (!this.stub && sid && token && this.from) {
-      const auth = Buffer.from(`${sid}:${token}`).toString('base64');
-      this.http = new ResilientHttp({
-        name: 'twilio',
-        baseURL: `https://api.twilio.com/2010-04-01/Accounts/${sid}`,
-        timeoutMs: this.config.get('TWILIO_TIMEOUT_MS', { infer: true }),
-        headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
+    this.apiKey = this.config.get("TERMII_API_KEY", { infer: true });
+    this.senderId = this.config.get("TERMII_SENDER_ID", { infer: true });
+
+    this.http = new ResilientHttp({
+      name: "termii",
+      baseURL: this.config.get("TERMII_BASE_URL", { infer: true }),
+      timeoutMs: this.config.get("TERMII_TIMEOUT_MS", { infer: true }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+  }
+
+  async sendManySms(messages: SmsPayload[]): Promise<SmsResult[]> {
+    // Termii allows batching, but for SOS, mapping over individual concurrent requests is often safer
+    // to isolate failures per recipient.
+    return Promise.all(messages.map((msg) => this.sendSms(msg.to, msg.body)));
+  }
+
+  private async sendSms(to: string, body: string): Promise<SmsResult> {
+    try {
+      // Clean phone number (ensure international format without '+' for Termii if required)
+      const formattedNumber = to.replace("+", "");
+
+      const response = await this.http.request<{
+        message_id?: string;
+        message?: string;
+      }>({
+        method: "POST",
+        url: "/api/sms/send",
+        data: {
+          to: formattedNumber,
+          from: this.senderId,
+          sms: body,
+          type: "plain",
+          channel: "generic", // 'dnd' is recommended for OTPs, 'generic' for transactional updates
+          api_key: this.apiKey,
         },
       });
-    } else if (!this.stub) {
-      this.logger.warn('Twilio not configured — SMS will silently no-op');
-    }
-  }
 
-  async sendSms(to: string, body: string): Promise<SmsResult> {
-    if (this.stub) {
-      this.logger.log(`[STUB SMS] to=${to} body="${body}"`);
-      return { ok: true, provider: 'stub' };
+      return {
+        ok: !!response.message_id,
+        providerRef: response.message_id,
+      };
+    } catch (error) {
+      this.logger.error(`Termii SMS failed to ${to}: ${error}`);
+      return { ok: false, error };
     }
-    if (!this.http || !this.from) {
-      this.logger.warn(`SMS not sent (no provider) to=${to}`);
-      return { ok: false, provider: 'none', error: 'not_configured' };
-    }
-    try {
-      const params = new URLSearchParams({ To: to, From: this.from, Body: body });
-      const data = await this.http.request<{ sid: string }>({
-        method: 'POST',
-        url: '/Messages.json',
-        data: params.toString(),
-      });
-      return { ok: true, provider: 'twilio', providerRef: data.sid };
-    } catch (err) {
-      // ApiError already normalised, but we don't want to throw — SMS failures shouldn't abort SOS
-      this.logger.error(`SMS failed to=${to}: ${(err as Error).message}`);
-      return { ok: false, provider: 'twilio', error: (err as Error).message };
-    }
-  }
-
-  async sendManySms(recipients: { to: string; body: string }[]): Promise<SmsResult[]> {
-    return Promise.all(recipients.map((r) => this.sendSms(r.to, r.body)));
   }
 }

@@ -1,9 +1,9 @@
-import { Global, Module } from '@nestjs/common';
-import { IdentityService, MonoAdapter, VerifyMeAdapter } from './identity.service';
+import { Global, Module } from "@nestjs/common";
+import { IdentityService, DojahAdapter } from "./identity.service";
 
 @Global()
 @Module({
-  providers: [MonoAdapter, VerifyMeAdapter, IdentityService],
+  providers: [IdentityService, DojahAdapter],
   exports: [IdentityService],
 })
 export class IdentityModule {}
