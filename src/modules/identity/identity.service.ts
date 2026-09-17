@@ -4,7 +4,6 @@ import type { AppEnv } from "@/config/env";
 import { ApiError } from "@/common/api-error";
 import { ResilientHttp } from "@/common/resilient-http";
 
-// ── Ports ─────────────────────────────────────────────────
 export interface NinResult {
   ok: boolean;
   fullName?: string;
@@ -27,16 +26,27 @@ export interface LicenseResult {
   raw?: unknown;
 }
 
+export interface VehicleResult {
+  ok: boolean;
+  make?: string;
+  model?: string;
+  color?: string;
+  year?: string;
+  ownerName?: string;
+  chassisNumber?: string;
+  provider: string;
+  raw?: unknown;
+}
+
 export abstract class IdentityProvider {
   abstract verifyNin(nin: string, dateOfBirth?: string): Promise<NinResult>;
   abstract verifyDriverLicense(
     licenseNumber: string,
     dateOfBirth?: string,
   ): Promise<LicenseResult>;
+  abstract verifyVehiclePlate(plateNumber: string): Promise<VehicleResult>;
 }
 
-// ── Dojah Adapter (NIN & Driver's License) ────────────────
-// Docs: https://docs.dojah.io/reference/kyc-nin
 @Injectable()
 export class DojahAdapter implements OnModuleInit {
   private http!: ResilientHttp;
@@ -112,6 +122,30 @@ export class DojahAdapter implements OnModuleInit {
       raw: data,
     };
   }
+
+  async lookupVehicle(plateNumber: string): Promise<VehicleResult> {
+    const data = await this.http.request<{ entity?: any; error?: string }>({
+      method: "GET",
+      url: `/api/v1/kyc/vehicle?vehicle_number=${plateNumber}`,
+    });
+
+    if (!data.entity) {
+      return { ok: false, provider: "dojah", raw: data };
+    }
+
+    const v = data.entity;
+    return {
+      ok: true,
+      make: v.make,
+      model: v.model,
+      color: v.color,
+      year: v.year,
+      ownerName: v.owner_name,
+      chassisNumber: v.chassis_number,
+      provider: "dojah",
+      raw: data,
+    };
+  }
 }
 
 // ── Facade ────────────────────────────────────────────────
@@ -174,5 +208,29 @@ export class IdentityService extends IdentityProvider {
       };
     }
     return this.dojah.lookupLicense(licenseNumber, dob);
+  }
+
+  async verifyVehiclePlate(plateNumber: string): Promise<VehicleResult> {
+    const sanitizedPlate = plateNumber.replace(/[\s-]/g, "").toUpperCase();
+
+    if (sanitizedPlate.length < 5) {
+      throw new ApiError({
+        code: "INVALID_INPUT",
+        message: "Invalid plate number format",
+      });
+    }
+
+    if (this.stub) {
+      this.logger.warn(`STUB vehicle verify for ${sanitizedPlate}`);
+      return {
+        ok: true,
+        make: "Toyota",
+        model: "Camry",
+        color: "Black",
+        year: "2018",
+        provider: "stub",
+      };
+    }
+    return this.dojah.lookupVehicle(sanitizedPlate);
   }
 }

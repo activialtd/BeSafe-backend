@@ -1,10 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
-import { z } from 'zod';
-import { ApiError } from '@/common/api-error';
-import { DB, Database } from '@/db/db.module';
-import { drivers, users, vehicles } from '@/db/schema';
-import { AuditService } from '@/modules/audit/audit.service';
+import { Inject, Injectable } from "@nestjs/common";
+import { and, eq } from "drizzle-orm";
+import { z } from "zod";
+import { ApiError } from "@/common/api-error";
+import { DB, Database } from "@/db/db.module";
+import { drivers, users, vehicles } from "@/db/schema";
+import { AuditService } from "@/modules/audit/audit.service";
 
 export const verifyByQrDto = z.object({
   qrToken: z.string().min(4).max(200),
@@ -14,7 +14,7 @@ export const verifyByPlateDto = z.object({
     .string()
     .min(3)
     .max(20)
-    .transform((v) => v.toUpperCase().replace(/\s+/g, '-')),
+    .transform((v) => v.toUpperCase().replace(/[\s-]/g, "")),
 });
 
 export interface VerificationResult {
@@ -44,34 +44,50 @@ export interface VerificationResult {
 
 @Injectable()
 export class VerifyService {
-  constructor(@Inject(DB) private readonly db: Database, private readonly audit: AuditService) {}
+  constructor(
+    @Inject(DB) private readonly db: Database,
+    private readonly audit: AuditService,
+  ) {}
 
-  async byQr(qrToken: string, actorId: string | null, corId: string, ip?: string): Promise<VerificationResult> {
+  async byQr(
+    qrToken: string,
+    actorId: string | null,
+    corId: string,
+    ip?: string,
+  ): Promise<VerificationResult> {
     const row = await this.lookup(eq(vehicles.qrToken, qrToken));
     this.audit.write({
       actorId,
-      action: 'verify.by_qr',
-      targetType: 'vehicle',
+      action: "verify.by_qr",
+      targetType: "vehicle",
       targetId: row?.vehicle.id,
       correlationId: corId,
       ip,
-      metadata: { ok: !!row, qrToken: qrToken.slice(0, 20) + '…' },
+      metadata: { ok: !!row, qrToken: qrToken.slice(0, 20) + "…" },
     });
-    return this.render(row, 'This vehicle is not in the BeSafe registry.');
+    return this.render(row, "This vehicle is not in the BeSafe registry.");
   }
 
-  async byPlate(plate: string, actorId: string | null, corId: string, ip?: string): Promise<VerificationResult> {
+  async byPlate(
+    plate: string,
+    actorId: string | null,
+    corId: string,
+    ip?: string,
+  ): Promise<VerificationResult> {
     const row = await this.lookup(eq(vehicles.plateNumber, plate));
     this.audit.write({
       actorId,
-      action: 'verify.by_plate',
-      targetType: 'vehicle',
+      action: "verify.by_plate",
+      targetType: "vehicle",
       targetId: row?.vehicle.id,
       correlationId: corId,
       ip,
       metadata: { ok: !!row, plate },
     });
-    return this.render(row, 'This plate number is NOT registered on BeSafe. Do NOT enter.');
+    return this.render(
+      row,
+      "This plate number is NOT registered on BeSafe. Do NOT enter.",
+    );
   }
 
   private async lookup(whereClause: any) {
@@ -104,13 +120,19 @@ export class VerifyService {
 
     const warnings: string[] = [];
     if (driver.suspendedAt) {
-      return { ok: false, reason: 'This driver has been suspended from BeSafe.' };
+      return {
+        ok: false,
+        reason: "This driver has been suspended from BeSafe.",
+      };
     }
-    if (driver.licenseExpiresAt && driver.licenseExpiresAt.getTime() < Date.now()) {
+    if (
+      driver.licenseExpiresAt &&
+      driver.licenseExpiresAt.getTime() < Date.now()
+    ) {
       warnings.push("Driver's license has expired.");
     }
     if (driver.rating > 0 && driver.rating < 400) {
-      warnings.push('Driver has a rating below 4.0.');
+      warnings.push("Driver has a rating below 4.0.");
     }
     if (driver.flagCount > 3) {
       warnings.push(`Driver has ${driver.flagCount} open reports.`);

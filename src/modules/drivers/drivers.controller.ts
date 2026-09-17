@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -19,13 +20,17 @@ import {
   registerVehicleDto,
   verifyLicenseDto,
 } from "./dto/register.dto";
+import { IdentityService } from "../identity/identity.service";
 
 const setOnlineDto = z.object({ online: z.boolean() });
 const revokeDto = z.object({ reason: z.string().min(1).max(500) });
 
 @Controller("driver")
 export class DriversController {
-  constructor(private readonly svc: DriversService) {}
+  constructor(
+    private readonly svc: DriversService,
+    private readonly identityService: IdentityService,
+  ) {}
 
   @Get("me")
   @Roles("driver")
@@ -41,6 +46,29 @@ export class DriversController {
     @Req() req: Request,
   ) {
     return this.svc.verifyLicense(user.id, body, req.correlationId, req.ip);
+  }
+
+  @Post("verify-plate")
+  async verifyPlate(@Body() dto: { plateNumber: string }) {
+    const verification = await this.identityService.verifyVehiclePlate(
+      dto.plateNumber,
+    );
+
+    if (!verification.ok) {
+      throw new BadRequestException("We could not verify this plate number");
+    }
+
+    return {
+      message: "Plate verified successfully",
+      details: {
+        make: verification.make,
+        model: verification.model,
+        color: verification.color,
+        year: verification.year,
+        ownerName: verification.ownerName,
+        chassisNumber: verification.chassisNumber,
+      },
+    };
   }
 
   @Post("vehicles")
